@@ -1,0 +1,545 @@
+--------------------------------------------------------------------------------
+--
+--   FileName:         hw_image_generator.vhd
+--   Dependencies:     none
+--   Design Software:  Quartus II 64-bit Version 12.1 Build 177 SJ Full Version
+--
+--   HDL CODE IS PROVIDED "AS IS."  DIGI-KEY EXPRESSLY DISCLAIMS ANY
+--   WARRANTY OF ANY KIND, WHETHER EXPRESS OR IMPLIED, INCLUDING BUT NOT
+--   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+--   PARTICULAR PURPOSE, OR NON-INFRINGEMENT. IN NO EVENT SHALL DIGI-KEY
+--   BE LIABLE FOR ANY INCIDENTAL, SPECIAL, INDIRECT OR CONSEQUENTIAL
+--   DAMAGES, LOST PROFITS OR LOST DATA, HARM TO YOUR EQUIPMENT, COST OF
+--   PROCUREMENT OF SUBSTITUTE GOODS, TECHNOLOGY OR SERVICES, ANY CLAIMS
+--   BY THIRD PARTIES (INCLUDING BUT NOT LIMITED TO ANY DEFENSE THEREOF),
+--   ANY CLAIMS FOR INDEMNITY OR CONTRIBUTION, OR OTHER SIMILAR COSTS.
+--
+--   Version History
+--   Version 1.0 05/10/2013 Scott Larson
+--     Initial Public Release
+--    
+--------------------------------------------------------------------------------
+
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+Use Ieee.std_logic_unsigned.all;
+use IEEE.math_real.all;
+
+ENTITY hw_image_generator IS
+	GENERIC(
+		pixels_y 	:	INTEGER := 100;    --row that first color will persist until
+		pixels_x   	:	INTEGER := 0;   --column that first color will persist until
+			clk_freq              : INTEGER := 50_000_000; --system clock frequency in Hz
+		debounce_counter_size : INTEGER := 8);  
+		
+	PORT(
+		disp_ena		:	IN		STD_LOGIC;	--display enable ('1' = display time, '0' = blanking time)
+		clk			: 	IN		STD_LOGIC;
+		row			:	IN		INTEGER;		--row pixel coordinate
+		column		:	IN		INTEGER;		--column pixel coordinate
+		red			:	OUT	STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0');  --red magnitude output to DAC
+		green			:	OUT	STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0');  --green magnitude output to DAC
+		blue			:	OUT	STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0'); --blue magnitude output to DAC
+		 ps2_clk      : IN  STD_LOGIC;                     --clock signal from PS/2 keyboard
+    ps2_data     : IN  STD_LOGIC;                     --data signal from PS/2 keyboard
+    ps2_code_new : OUT STD_LOGIC;                     --flag that new PS/2 code is available on ps2_code bus
+    ps2_code     : OUT STD_LOGIC_VECTOR(7 DOWNTO 0);
+	 Test_led1	  : OUT STD_LOGIC;
+	 test_led	  : OUT STD_LOGIC);
+		
+END hw_image_generator;
+
+ARCHITECTURE behavior OF hw_image_generator IS
+
+
+Signal ps2_code_test : STD_LOGIC_VECTOR(7 DOWNTO 0);
+
+Signal 	birdx :	 INTEGER := 1250;
+Signal	birdy :	 INTEGER := 0;
+
+Signal	game_over :	 INTEGER := 1;
+
+Signal   clockit : INTEGER := 1;
+Signal   clockit2 : INTEGER := 251;
+Signal   clockit3 : INTEGER := 501;
+Signal   clockit4 : INTEGER := 751;
+
+SIGNAL hole1 : INTEGER := 300;
+SIGNAL hole2 : INTEGER := 500;
+SIGNAL hole3 : INTEGER := 400;
+SIGNAL hole4 : INTEGER := 100;
+
+SIGNAL pipe_speed : INTEGER := 0;
+
+
+Signal   sendit : INTEGER := 1;
+SIGNAL   birdit : BOOLEAN;
+Signal initial_depth : INTEGER := 0;
+Signal initial_depth2 : INTEGER := 0;
+Signal initial_depth3 : INTEGER := 0;
+Signal initial_depth4 : INTEGER := 0;
+Signal bird_r_col: STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0');
+Signal bird_g_col: STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0');
+Signal birdv_anim : STD_LOGIC;
+Signal bird_b_col: STD_LOGIC_VECTOR(7 DOWNTO 0) := (OTHERS => '0');
+Signal ps2_double_clock : BOOLEAN;
+SIGNAL test_var : INTEGER;
+SIGNAL test_1 : INTEGER :=0;
+SIGNAL test_2 : INTEGER :=0;
+SIGNAL bird_animate : INTEGER;
+SIGNAL bird_anim_clock : INTEGER;
+
+  SIGNAL sync_ffs     : STD_LOGIC_VECTOR(1 DOWNTO 0);       --synchronizer flip-flops for PS/2 signals
+  SIGNAL ps2_clk_int  : STD_LOGIC;                          --debounced clock signal from PS/2 keyboard
+  SIGNAL ps2_data_int : STD_LOGIC;                          --debounced data signal from PS/2 keyboard
+  SIGNAL ps2_word     : STD_LOGIC_VECTOR(10 DOWNTO 0);      --stores the ps2 data word
+  SIGNAL duplicate    : STD_LOGIC_VECTOR(8 DOWNTO 1); 
+  SIGNAL error        : STD_LOGIC;                          --validate parity, start, and stop bits
+  SIGNAL count_idle   : INTEGER RANGE 0 TO clk_freq/18_000; --counter to determine PS/2 is idle
+
+   COMPONENT debounce IS
+    GENERIC(
+      counter_size : INTEGER); --debounce period (in seconds) = 2^counter_size/(clk freq in Hz)
+    PORT(
+      clk    : IN  STD_LOGIC;  --input clock
+      button : IN  STD_LOGIC;  --input signal to be debounced
+      result : OUT STD_LOGIC); --debounced signal
+  END COMPONENT;
+  
+  
+BEGIN
+
+-- PS2 stuff
+ PROCESS(clk)
+  BEGIN
+    IF(clk'EVENT AND clk = '1') THEN  --rising edge of system clock
+      sync_ffs(0) <= ps2_clk;           --synchronize PS/2 clock signal
+      sync_ffs(1) <= ps2_data;          --synchronize PS/2 data signal
+    END IF;
+  END PROCESS;
+
+  --debounce PS2 input signals
+  debounce_ps2_clk: debounce
+    GENERIC MAP(counter_size => debounce_counter_size)
+    PORT MAP(clk => clk, button => sync_ffs(0), result => ps2_clk_int);
+  debounce_ps2_data: debounce
+    GENERIC MAP(counter_size => debounce_counter_size)
+    PORT MAP(clk => clk, button => sync_ffs(1), result => ps2_data_int);
+
+  --input PS2 data
+  PROCESS(ps2_clk_int)
+  BEGIN
+    IF(ps2_clk_int'EVENT AND ps2_clk_int = '0') THEN    --falling edge of PS2 clock
+      ps2_word <= ps2_data_int & ps2_word(10 DOWNTO 1);   --shift in PS2 data bit
+    END IF;
+  END PROCESS;
+    
+  --verify that parity, start, and stop bits are all correct
+  error <= NOT (NOT ps2_word(0) AND ps2_word(10) AND (ps2_word(9) XOR ps2_word(8) XOR
+        ps2_word(7) XOR ps2_word(6) XOR ps2_word(5) XOR ps2_word(4) XOR ps2_word(3) XOR 
+        ps2_word(2) XOR ps2_word(1)));  
+
+  --determine if PS2 port is idle (i.e. last transaction is finished) and output result
+  PROCESS(clk)
+  BEGIN
+    IF(clk'EVENT AND clk = '1') THEN  	 --rising edge of system clock
+	 
+		test_2 <= test_2 + 1;
+		
+    
+      IF(ps2_clk_int = '0') THEN                 --low PS2 clock, PS/2 is active
+        count_idle <= 0;                           --reset idle counter
+      ELSIF(count_idle /= clk_freq/18_000) THEN  --PS2 clock has been high less than a half clock period (<55us)
+          count_idle <= count_idle + 1;            --continue counting
+      END IF;
+      
+      IF(count_idle = clk_freq/18_000 AND error = '0') THEN  --idle threshold reached and no errors detected
+        ps2_code_new <= '1';         		  --set flag that new PS/2 code is available
+		  test_led <= '1';
+		  
+        ps2_code <= ps2_word(8 DOWNTO 1); 		  --output new PS/2 code
+		
+		
+		
+		IF( ps2_word(8 DOWNTO 1) = ps2_code_test) THEN  -- NEW INPUT
+		
+		
+		birdit <= false ;
+		
+		ELSE
+		
+		ps2_code_test <= ps2_word(8 DOWNTO 1);
+		birdit <= true ;
+		  
+	   END IF;
+
+		-- KEYBAORD DETECTION
+		
+		if(ps2_word(8 DOWNTO 1) = X"16") THEN
+		
+		test_var <= 1;
+		
+		ELSif(ps2_word(8 DOWNTO 1) = X"1E") THEN
+		
+		test_var <= 2;
+
+		
+		ELSif(ps2_word(8 DOWNTO 1) = X"26") THEN
+		
+		test_var <= 3;
+		
+		ELSif(ps2_word(8 DOWNTO 1) = X"25") THEN
+		
+		test_var <= 4;
+		
+		elsif(ps2_word(8 DOWNTO 1) = X"2E") THEN
+		
+		test_var <= 5;
+		
+		elsif(ps2_word(8 DOWNTO 1) = X"75") THEN
+		
+		  bird_animate <= 1;
+ 
+		
+		END IF;
+
+      ELSE                                                   --PS/2 port active or error detected
+        ps2_code_new <= '0';                                   --set flag that PS/2 transaction is in progress
+		  test_led <= '0';
+		  ps2_code_test <= "00000000";
+		  test_var <= 0;
+		  bird_animate <= 0;
+		  
+		  
+   END IF;
+
+    END IF; -- EN KEYBOARD DETECTION
+
+	
+	IF( test_2 > 1048576 AND (clk'EVENT AND clk = '1') ) THEN
+	
+	test_2 <= 0;
+	
+	IF(bird_animate = 1 ) THEN
+	birdy <= birdy - 10;
+	
+	ELSE
+	birdy <= birdy + 10;
+	
+	END IF;
+	
+	IF(birdy > 800) THEN
+	
+	birdy <= -500;
+	
+	END IF;
+	
+	IF(birdy < -500) THEN
+	
+	birdy <= 800;
+	
+	END IF;
+	
+	
+	END IF;
+	
+	
+	
+	
+	 
+	 
+	 
+	IF(clk'EVENT AND clk = '1')THEN
+	
+		
+	
+		
+		IF(test_var  = 1) THEN
+	
+		bird_r_col <=  "10110111";
+		bird_g_col <=  "00000000";
+		bird_b_col <=  "00001111";
+		
+		pipe_speed <= 1;
+		
+		
+		
+		
+		ELSIF(test_var  = 2) THEN
+	
+		bird_r_col <=  "11000111";
+		bird_g_col <=  "10011101";
+		bird_b_col <=  "01010111";
+		
+		pipe_speed <= 2;
+		
+	
+		
+		ELSIF(test_var  = 3) THEN
+	
+		bird_r_col <=  "10101001";
+		bird_g_col <=  "01010000";
+		bird_b_col <=  "10001101";
+		
+		pipe_speed <= 3;
+		
+	
+		
+			ELSIF(test_var  = 4) THEN
+	
+		bird_r_col <=  "00010000";
+		bird_g_col <=  "11000100";
+		bird_b_col <=  "01010100";
+		
+		pipe_speed <= 4;
+		
+			ELSIF(test_var  = 5) THEN
+	
+		bird_r_col <=  "11101000";
+		bird_g_col <=  "10000010";
+		bird_b_col <=  "10110001";
+		
+		pipe_speed <= 5;
+		
+		END IF;
+	
+	END IF;
+	 
+	 
+  END PROCESS;
+
+-- END PS2
+
+	PROCESS(clk,row,column)
+	
+	-- PIPE DRAWING
+VARIABLE pipe_pad : INTEGER range 0 to 1000;
+VARIABLE pipe_count : INTEGER range 0 to 1000;
+VARIABLE pipe_length : INTEGER range 0 to 1000;
+VARIABLE max_pipes : INTEGER range 0 to 1000;
+
+-- END PIPE VARIABLES
+
+
+	
+	BEGIN
+	
+ pipe_pad		:= 250;
+ pipe_length	:= 50;
+ max_pipes 		:= 7;
+
+
+		
+		
+
+
+ 
+ 
+		IF(clk'EVENT AND clk = '1') THEN
+			sendit <= sendit +1;
+			
+		END IF;
+		
+		
+		
+
+		IF(sendit > 1048576 AND (clk'EVENT AND clk = '1') ) THEN
+		sendit <= 0;
+		clockit <= clockit + pipe_speed ;
+		clockit2 <= clockit2 + pipe_speed;
+		clockit3 <= clockit3 + pipe_speed;
+		clockit4 <= clockit4 + pipe_speed;
+		END IF;
+		
+		
+		
+		IF(clockit > 1536 AND (clk'EVENT AND clk = '1')) THEN
+		
+		clockit <= 0;
+		
+		
+		END IF;
+		
+		IF(clockit2 > 1536 AND (clk'EVENT AND clk = '1')) THEN
+		
+		clockit2 <= 0;
+		
+		END IF;
+		
+		IF(clockit3 > 1536 AND (clk'EVENT AND clk = '1')) THEN
+		
+		clockit3 <= 0;
+		
+		
+		END IF;
+		
+		IF(clockit4 > 1536 AND (clk'EVENT AND clk = '1')) THEN
+		
+		clockit4 <= 0;
+
+		
+		END IF;
+	
+
+		IF(disp_ena = '1' AND (clk'EVENT AND clk = '1')) THEN		--display time
+	
+		initial_depth  <= (clockit);
+		initial_depth2 <= (clockit2);
+		initial_depth3 <= (clockit3);
+		initial_depth4 <= (clockit4);
+		
+		-- START COLLISION----------------
+		-- COLISION 
+		
+		
+		
+		IF(birdx > (initial_depth + 50) OR (birdx + 50) < initial_depth)  THEN
+		ELSE 
+		IF(birdy + 500 > 100 AND birdy + 550 < 400) THEN
+		ELSE
+		game_over <= 0;
+		END IF;
+		END IF;
+		
+		IF(birdx > (initial_depth2 + 50) OR (birdx + 50) < initial_depth2)  THEN
+		ELSE 
+		IF(birdy + 500 > 400 AND birdy + 550 < 700) THEN
+		ELSE
+		game_over <= 0;
+		END IF;
+		END IF;
+		
+		IF(birdx > (initial_depth3 + 50) OR (birdx + 50) < initial_depth3)  THEN
+		ELSE 
+		IF(birdy + 500 > 500 AND birdy + 550 < 800) THEN
+		ELSE
+		game_over <= 0;
+		END IF;
+		END IF;
+		
+		IF(birdx > (initial_depth4 + 50) OR (birdx + 50) < initial_depth4)  THEN
+		ELSE 
+		IF(birdy + 500 > 300 AND birdy + 550 < 600) THEN
+		ELSE
+		game_over <= 0;
+		END IF;
+		END IF;
+		
+		
+		
+
+		
+		------------- END COLLISION
+		
+		
+		
+		
+		
+
+		 
+				-- draw bird
+				
+			
+			
+			
+			IF ((row > birdx AND row < birdx + 50) AND (column > birdy + 500 AND column < 550 + birdy) AND game_over = 1) THEN
+			
+			
+				IF(game_over = 1) THEN
+				red <= bird_r_col;
+				green	<= bird_g_col;
+				blue <= bird_b_col;
+				
+				ELSE
+				
+				red <=  "00000000";
+				green <=  "11111111";
+				blue <=  "00000000";
+				
+				
+				END IF;
+				
+				-- draw pipe1
+				
+			ELSIF ((row  > initial_depth4  AND row < initial_depth4 + pipe_length) AND (column > 0 AND column < hole1) AND game_over = 1) THEN
+			
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_g_col;
+				
+			
+			ELSIF((row  > initial_depth4  AND row < initial_depth4 + pipe_length) And (column > hole1 + 300 And column < 2000) AND game_over = 1)  THEN
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_b_col;	
+	
+				-- pipe 2
+				
+			ELSIF ((row  > initial_depth3  AND row < initial_depth3 + pipe_length) AND (column > 0 AND column < hole2) AND game_over = 1) THEN
+			
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_g_col;
+				
+			
+			ELSIF((row  > initial_depth3 AND row < initial_depth3 + pipe_length) And (column > hole2 + 300 And column < 2000) AND game_over = 1)  THEN
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_b_col;	
+				
+				-- pipe 3
+				
+			ELSIF ((row  > initial_depth2  AND row < initial_depth2 + pipe_length) AND (column > 0 AND column < hole3) AND game_over = 1) THEN
+			
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_g_col;
+				
+			
+			ELSIF((row  > initial_depth2  AND row < initial_depth2 + pipe_length) And (column > hole3 + 300 And column < 2000) AND game_over = 1)  THEN
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_b_col;	
+				
+				-- pipe 4
+				
+			ELSIF ((row  > initial_depth  AND row < initial_depth + pipe_length) AND (column > 0 AND column < hole4) AND game_over = 1) THEN
+			
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_g_col;
+				
+				
+			
+			ELSIF((row  > initial_depth  AND row < initial_depth + pipe_length) And (column > hole4 + 300 And column < 2000) AND game_over = 1)  THEN
+				red <= bird_b_col;
+				green	<= bird_r_col;
+				blue <= bird_b_col;	
+				
+			ELSIF((row > 0 AND row < 1900) AND (column > 0 AND column < 1100) AND game_over = 0) THEN
+			
+			red <=  "11111111";
+			blue <= "00000000";
+			green  <= "00000000";
+
+		-- end draw pipes	
+			
+			ELSE								--blanking time 11111111
+			red <= (OTHERS => '0');
+			green <= (OTHERS => '0');
+			blue <= (OTHERS => '0');
+			
+			END IF;
+			
+		
+			
+			
+		
+	END IF;
+	
+	
+	END PROCESS;
+	
+	
+	
+END behavior;
